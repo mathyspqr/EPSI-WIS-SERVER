@@ -46,9 +46,65 @@ const bcrypt = require("bcrypt");
 app.get(
   "/nurscare",
   async (request: express.Request, result: express.Response) => {
-    let todos = await query("Select * from personnel");
+    let todos = await query("Select * from user");
     console.log(`route "/nurscare" called`);
     return result.status(200).json(todos);
+  }
+);
+
+app.get(
+  "/nurscare/administratifuser",
+  async (request: express.Request, result: express.Response) => {
+    let todos = await query("Select * from administratif");
+    console.log(`route "/nurscare" called`);
+    return result.status(200).json(todos);
+  }
+);
+
+app.get(
+  "/nurscare/bdeinfo",
+  async (request: express.Request, result: express.Response) => {
+    try {
+      const todos = await query(`
+        SELECT bde.*, campus.* 
+        FROM bde 
+        INNER JOIN campus ON bde.id_campus = campus.id_campus
+      `);
+      console.log(`route "/nurscare/bdeinfo" called`);
+      return result.status(200).json(todos);
+    } catch (error) {
+      console.error("Error fetching BDE information:", error);
+      return result.status(500).json("Internal Server Error");
+    }
+  }
+);
+
+
+app.get(
+  "/nurscare/roles",
+  async (request: express.Request, result: express.Response) => {
+    try {
+      const queryResult = await query(`
+        SELECT administratif.*, 
+               campus.nom_campus, 
+               campus.adresse_campus, 
+               role.nom_role 
+        FROM administratif
+        LEFT JOIN campus ON administratif.id_campus = campus.id_campus
+        LEFT JOIN role ON administratif.id_role = role.id_role
+        WHERE administratif.id_role IN (2, 3, 4)
+      `);
+      console.log(`Route "/nurscare/roles" appelée`);
+
+      if (queryResult.length === 0) {
+        return result.status(404).send("Aucun utilisateur trouvé avec ces rôles");
+      }
+
+      return result.status(200).json(queryResult);
+    } catch (error) {
+      console.error("Erreur lors de la récupération des utilisateurs:", error);
+      return result.status(500).send("Erreur interne du serveur");
+    }
   }
 );
 
@@ -159,6 +215,104 @@ app.post("/nurscare/bon", async (request, response) => {
   }
 });
 
+// ROUTE POUR RÉCUPÉRER LES MESSAGES D'UN UTILISATEUR
+app.get('/nurscare/messages/received/:userId', async (request, response) => {
+  const userId = request.params.userId;
+  try {
+    const queryResult = await query("SELECT * FROM messages WHERE id_destinataire = ?", [userId]);
+    return response.status(200).json(queryResult);
+  } catch (error) {
+    console.error("Error:", error);
+    return response.status(500).json("Internal Server Error");
+  }
+});
+
+// ROUTE POUR ENVOYER UN MESSAGE
+app.post('/nurscare/messages/send', async (request, response) => {
+  const { id_expéditeur, id_destinataire, sujet, contenu, id_message_parent } = request.body; // Ajout de id_message_parent
+  try {
+    const insertMessageQuery = await query(
+      "INSERT INTO messages (id_expéditeur, id_destinataire, sujet, contenu, id_message_parent) VALUES (?, ?, ?, ?, ?)", // Ajout de id_message_parent dans la requête
+      [id_expéditeur, id_destinataire, sujet, contenu, id_message_parent]
+    );
+    return response.status(201).json("Message envoyé avec succès");
+  } catch (error) {
+    console.error("Error:", error);
+    return response.status(500).json("Internal Server Error");
+  }
+});
+
+app.get('/nurscare/messages/conversation/:idMessage', async (request, response) => {
+  const idMessage = request.params.idMessage;
+  try {
+    // Récupérer le message parent
+    const parentMessageQuery = await query("SELECT id_message_parent FROM messages WHERE id_message = ?", [idMessage]);
+    const idMessageParent = parentMessageQuery[0]?.id_message_parent || idMessage; // Si pas de parent, utiliser l'id du message actuel
+
+    // Récupérer tous les messages de la conversation avec les détails des utilisateurs
+    const queryResult = await query(`
+      SELECT m.*, 
+             u_exp.nom_user AS nom_expediteur, 
+             u_exp.prenom_user AS prenom_expediteur, 
+             u_dest.nom_user AS nom_destinataire, 
+             u_dest.prenom_user AS prenom_destinataire 
+      FROM messages m
+      LEFT JOIN user u_exp ON m.id_expéditeur = u_exp.id_user
+      LEFT JOIN user u_dest ON m.id_destinataire = u_dest.id_user
+      WHERE m.id_message_parent = ? OR m.id_message = ?`, 
+      [idMessageParent, idMessage]
+    );
+
+    return response.status(200).json(queryResult);
+  } catch (error) {
+    console.error("Error:", error);
+    return response.status(500).json("Internal Server Error");
+  }
+});
+
+
+// ROUTE POUR ENVOYER UNE RÉPONSE À UN MESSAGE
+app.post('/nurscare/messages/reply', async (request, response) => {
+  const { id_expéditeur, id_destinataire, sujet, contenu, id_messageparent } = request.body;
+  try {
+    const insertReplyQuery = await query(
+      "INSERT INTO messages (id_expéditeur, id_destinataire, sujet, contenu, id_messageparent) VALUES (?, ?, ?, ?, ?)",
+      [id_expéditeur, id_destinataire, sujet, contenu, id_messageparent]
+    );
+    return response.status(201).json("Réponse envoyée avec succès");
+  } catch (error) {
+    console.error("Error:", error);
+    return response.status(500).json("Internal Server Error");
+  }
+});
+
+app.get('/nurscare/messages/received/:userId/with-responses', async (request, response) => {
+  const userId = request.params.userId;
+  try {
+    const queryResult = await query(`
+      SELECT 
+        m.*, 
+        u.nom_user AS destinataire_nom, 
+        u.prenom_user AS destinataire_prenom, 
+        u.id_campus AS destinataire_id_campus,
+        ue.nom_user AS expediteur_nom, 
+        ue.prenom_user AS expediteur_prenom,
+        ue.id_campus AS expediteur_id_campus
+      FROM messages m
+      LEFT JOIN user u ON m.id_destinataire = u.id_user
+      LEFT JOIN user ue ON m.id_expéditeur = ue.id_user
+      WHERE 
+        m.id_destinataire = ? 
+        OR m.id_message IN (SELECT id_message_parent FROM messages WHERE id_destinataire = ?)
+        OR m.id_expéditeur = ?
+    `, [userId, userId, userId]);
+    
+    return response.status(200).json(queryResult);
+  } catch (error) {
+    console.error("Error:", error);
+    return response.status(500).json("Internal Server Error");
+  }
+});
 
 
 
@@ -362,8 +516,6 @@ app.get("/nurscare/:id_personnel", async (request, response) => {
   }
 });
 
-
-
 // ROUTE POUR CREER UN USER
 app.post("/nurscare/createaccount", async (req, res) => {
   try {
@@ -565,107 +717,70 @@ app.post("/nurscare/loginaccount", async (req, res) => {
   }
 });
 
-// ROUTE POUR MODIF INFO USER
+// ROUTE POUR MODIFIER UN UTILISATEUR
 app.post("/nurscare/submitform", async (req, res) => {
   try {
     const {
       Email,
-      nom_personnel,
-      prenom_personnel,
-      date_naissance_personnel,
-      adresse_personnel,
-      id_role,
-      id_personnel,
-      id_organisme, // Add this line to get id_organisme from the request
+      nom_user,
+      prenom_user,
+      adresse_user,
+      id_campus,
+      id_user, // On récupère l'ID de l'utilisateur à modifier
     } = req.body;
-    console.log("Received form data:", req.body);
+    console.log("Données du formulaire reçues:", req.body);
 
     let updateParts = [];
     let values = [];
 
     if (Email) {
-      updateParts.push("email_personnel = ?");
+      updateParts.push("email_user = ?");
       values.push(Email);
     }
 
-    if (id_role) {
-      // Supprimer tous les rôles existants pour cet utilisateur dans les tables spécifiques
-      const deleteAdminQuery = `DELETE FROM administratif WHERE id_personnel = ?`;
-      await query(deleteAdminQuery, [id_personnel]);
-
-      const deleteSoignantQuery = `DELETE FROM soignant WHERE id_personnel = ?`;
-      await query(deleteSoignantQuery, [id_personnel]);
-
-      const deleteDirecteurQuery = `DELETE FROM directeur WHERE id_personnel = ?`;
-      await query(deleteDirecteurQuery, [id_personnel]);
-
-      const deleteStagiaireQuery = `DELETE FROM stagiaire WHERE id_personnel = ?`;
-      await query(deleteStagiaireQuery, [id_personnel]);
-
-      // Ajouter le nouveau rôle
-      if (id_role === 1 || id_role === 2 || id_role === 3 || id_role === 4) {
-        const insertQuery = `INSERT INTO ${
-          id_role === 1
-            ? "stagiaire"
-            : id_role === 2
-            ? "directeur"
-            : id_role === 3
-            ? "administratif"
-            : id_role === 4
-            ? "soignant"
-            : ""
-        } (id_personnel, id_organisme) VALUES (?, ?)`; // Add id_organisme to the insert query
-        await query(insertQuery, [id_personnel, id_organisme]);
-      }
-
-      updateParts.push("id_role = ?");
-      values.push(id_role);
+    if (nom_user) {
+      updateParts.push("nom_user = ?");
+      values.push(nom_user);
+    }
+    
+    if (prenom_user) {
+      updateParts.push("prenom_user = ?");
+      values.push(prenom_user);
+    }
+    
+    if (adresse_user) {
+      updateParts.push("adresse_user = ?");
+      values.push(adresse_user);
     }
 
-    if (nom_personnel) {
-      updateParts.push("nom_personnel = ?");
-      values.push(nom_personnel);
-    }
-    if (prenom_personnel) {
-      updateParts.push("prenom_personnel = ?");
-      values.push(prenom_personnel);
-    }
-    if (date_naissance_personnel) {
-      updateParts.push("date_naissance_personnel = ?");
-      values.push(date_naissance_personnel);
-    }
-    if (adresse_personnel) {
-      updateParts.push("adresse_personnel = ?");
-      values.push(adresse_personnel);
+    if (id_campus) {
+      updateParts.push("id_campus = ?");
+      values.push(id_campus);
     }
 
-    // Assurez-vous qu'il y a des champs à mettre à jour
-    if (updateParts.length === 0 || !id_personnel) {
-      return res
-        .status(400)
-        .json({ message: "No fields to update or ID missing" });
+    if (updateParts.length === 0 || !id_user) {
+      return res.status(400).json({ message: "Aucun champ à mettre à jour ou ID manquant" });
     }
 
-    const updateQuery = `UPDATE personnel SET ${updateParts.join(
-      ", "
-    )} WHERE id_personnel = ?`;
-    values.push(id_personnel);
+    const updateQuery = `UPDATE user SET ${updateParts.join(", ")} WHERE id_user = ?`;
+    values.push(id_user);
 
     const result = await query(updateQuery, values);
-    console.log("Update result:", result);
+    console.log("Résultat de la mise à jour:", result);
 
     if (result.affectedRows === 0) {
-      console.log(`No records found with id_personnel = ${id_personnel}`);
-      return res.status(404).json({ message: "Record not found" });
+      console.log(`Aucun enregistrement trouvé avec id_user = ${id_user}`);
+      return res.status(404).json({ message: "Enregistrement non trouvé" });
     }
 
-    console.log(`Form data updated for ${Email}`);
-    res.status(200).json({ message: "Form data successfully updated" });
+    console.log(`Données du formulaire mises à jour pour ${Email}`);
+    res.status(200).json({ message: "Données du formulaire mises à jour avec succès" });
   } catch (error) {
-    console.error("Error in /submitform:", error);
-    res.status(500).json({ message: "Internal server error" });
+    console.error("Erreur dans /submitform:", error);
+    res.status(500).json({ message: "Erreur interne du serveur" });
   }
 });
+
 
 // ROUTE POUR ADD UNE INTERVENTION
 app.post("/nurscare/addintervention", async (req, res) => {
@@ -1031,36 +1146,44 @@ app.post("/nurscare/ajouter-prestation/:id_intervention", async (req, res) => {
 
 //ROUTE POUR ENVOYER LA FACTURE
 app.post("/nurscare/envoiefacture", async (req, res) => {
+  // Créez le transporteur Nodemailer
   const transporter = nodemailer.createTransport({
-    host: "smtp.office365.com",
-    port: 587,
-    secure: false,
+    service: "Gmail",
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
     auth: {
-      user: "mathys0@hotmail.fr",
-      pass: "TiTi60340..",
+      user: "ipxlart@gmail.com",
+      pass: "lvdh zmmk ejee okfh",
     },
   });
   
-  const { to, subject, text, attachments } = req.body;
-  
+  // Extraire les données du corps de la requête
+  const { from, to, subject, text, attachments } = req.body;
+
+  // Vérifiez si les champs requis sont présents
   if (!to || !subject || !text) {
     return res.status(400).json({ success: false, error: "Invalid request body" });
   }
-  
-  const decodedAttachments = attachments.map((attachment:any) => ({
-    ...attachment,
-    content: Buffer.from(attachment.content, 'base64'),
-  }));
-  
+
+  // Décodez les pièces jointes si présentes
+  const decodedAttachments = attachments ? attachments.map((attachment:any) => ({
+    filename: attachment.filename, // Assurez-vous que ce champ est dans votre requête
+    content: Buffer.from(attachment.content, 'base64'), // Décodage de la pièce jointe
+  })) : [];
+
+  // Préparer les options d'envoi
   const mailOptions = {
-    from: "mathys0@hotmail.fr",
-    to: to,
+    from: `"Nom Affiché" <${from}>`, // Nom affiché avec l'adresse souhaitée
+    to: "mathys0@hotmail.fr",
     subject: subject,
     text: text,
     attachments: decodedAttachments || [],
-  };
+};
+
   
   try {
+    // Envoyer l'email
     await transporter.sendMail(mailOptions);
     console.log("Message sent: %s", mailOptions.text, mailOptions.attachments);
   
@@ -1069,8 +1192,7 @@ app.post("/nurscare/envoiefacture", async (req, res) => {
     console.error(error);
     res.status(500).json({ success: false, error: "Erreur lors de l'envoi de la facture." });
   }
-}  
-  );
+});
 
 
 app.listen(8080, () => console.log("server started, listening on port 8080"));
